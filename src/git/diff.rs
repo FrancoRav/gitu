@@ -5,7 +5,15 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 use similar::{udiff::UnifiedDiffHunk, Algorithm, ChangeTag, TextDiff};
-use std::{fs, iter, ops::Range, path::PathBuf, rc::Rc, str};
+use std::{
+    fs,
+    iter::{self},
+    ops::Range,
+    path::PathBuf,
+    rc::Rc,
+    str,
+};
+use tree_sitter_highlight::Highlighter;
 
 use crate::{config::Config, Res};
 
@@ -151,23 +159,105 @@ fn diff_files(
         read_blob(repo, &diffdelta.new_file())?
     };
 
-    diff_content(config, delta, old_content, new_content)
+    diff_content(config, delta, &old_content, &new_content)
+}
+
+mod syntax_highlight {
+    use std::ops::Range;
+
+    use ratatui::style::{Color, Style};
+    use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
+
+    pub(crate) fn create_config() -> HighlightConfiguration {
+        const HIGHLIGHT_NAMES: &[&str] = &[
+            "attribute",
+            "constant",
+            "function.builtin",
+            "function",
+            "keyword",
+            "operator",
+            "property",
+            "punctuation",
+            "punctuation.bracket",
+            "punctuation.delimiter",
+            "string",
+            "string.special",
+            "tag",
+            "type",
+            "type.builtin",
+            "variable",
+            "variable.builtin",
+            "variable.parameter",
+        ];
+
+        // TODO Add more languages, only Rust is used for now
+        let mut rust_config = HighlightConfiguration::new(
+            tree_sitter_rust::language(),
+            tree_sitter_rust::HIGHLIGHT_QUERY,
+            tree_sitter_rust::INJECTIONS_QUERY,
+            "",
+        )
+        .unwrap();
+
+        rust_config.configure(HIGHLIGHT_NAMES);
+        rust_config
+    }
+
+    pub(crate) fn iter_highlights<'a>(
+        old_highlighter: &'a mut Highlighter,
+        syntax_highlight_config: &'a HighlightConfiguration,
+        new_content: &'a [u8],
+    ) -> impl Iterator<Item = (Range<usize>, Style)> + 'a {
+        old_highlighter
+            .highlight(syntax_highlight_config, new_content, None, |_| None)
+            .unwrap()
+            .scan((0..0, Style::new()), |current, event| {
+                match event.unwrap() {
+                    HighlightEvent::Source { start, end } => {
+                        current.0 = start..end;
+                        Some(None)
+                    }
+                    HighlightEvent::HighlightStart(Highlight(highlight)) => {
+                        current.1 = Style::new().fg(Color::Indexed(highlight as u8));
+                        Some(None)
+                    }
+                    HighlightEvent::HighlightEnd => Some(Some(current.clone())),
+                }
+            })
+            .flatten()
+    }
 }
 
 fn diff_content(
     config: &Config,
     delta: &Delta,
-    old_content: String,
-    new_content: String,
+    old_content: &str,
+    new_content: &str,
 ) -> Res<Vec<Rc<Hunk>>> {
     let text_diff = TextDiff::configure()
         .algorithm(Algorithm::Patience)
-        .diff_lines(&old_content, &new_content);
+        .diff_lines(old_content, new_content);
+
+    let syntax_highlight_config = syntax_highlight::create_config();
+    let old_highlighter = &mut Highlighter::new();
+    let new_highlighter = &mut Highlighter::new();
+    let old_syntax_highlights = &mut syntax_highlight::iter_highlights(
+        old_highlighter,
+        &syntax_highlight_config,
+        old_content.as_bytes(),
+    );
+    let new_syntax_highlights = &mut syntax_highlight::iter_highlights(
+        new_highlighter,
+        &syntax_highlight_config,
+        new_content.as_bytes(),
+    );
 
     Ok(text_diff
         .unified_diff()
         .iter_hunks()
         .map(|hunk| {
+            // TODO Find a way to merge old/new syntax highlight ranges into the diff
+
             let formatted_hunk = format_hunk(config, &hunk, &text_diff);
 
             let new_start = hunk
