@@ -56,6 +56,8 @@ pub(crate) fn create(config: Rc<Config>, repo: Rc<Repository>, size: Rect) -> Re
                     ..Default::default()
                 }]
                 .into_iter()
+            } else if let Some(revert) = git::revert_status(&repo)? {
+                todo!();
             } else {
                 branch_status_items(&config, &repo)?.into_iter()
             }
